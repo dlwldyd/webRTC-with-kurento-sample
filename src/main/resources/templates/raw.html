@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Title</title>
+</head>
+<body>
+<video id="video" autoplay playsinline width="640" height="360" muted></video>
+<video id="remoteVideo" autoplay playsinline width="640" height="360"></video>
+</body>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/sockjs-client/1.6.1/sockjs.min.js" integrity="sha512-1QvjE7BtotQjkq8PxLeF6P46gEpBRXuskzIVgjFpekzFVF4yjRgrQvTG1MTOJ3yQgvTteKAcO7DSZI92+u/yZw==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js" integrity="sha512-iKDtgDyTHjAitUDdLljGhenhPwrbBfqTKWO1mkhSFH3A7blITC9MhYon6SjnMhp4o0rADGw9yAC6EW4t5a4K3g==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script>
+  const ws = new SockJS("http://localhost:8080/stomp");
+  const stomp = Stomp.over(ws);
+  let localStream;
+  let myPeerConnection;
+  const myVideo = document.getElementById("video");
+  const remoteVideo = document.getElementById("remoteVideo");
+  // stomp.debug = null;
+
+  const uuid = () => {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+      const r = Math.random() * 16 | 0, v = c === 'x' ? r : ((r & 0x3) | 0x8);
+      return v.toString(16);
+    });
+  }
+
+  const from = uuid();
+
+  const peerConnectionConfig = {
+    'iceServers': [
+      {'urls': 'stun:stun.stunprotocol.org:3478'},
+      {'urls': 'stun:stun.l.google.com:19302'},
+    ]
+  };
+
+  const handleTrack = (data) => {
+    remoteVideo.srcObject = data.streams[0];
+  }
+
+  const createPeerConnection = () => {
+    const newPeerConnection = new RTCPeerConnection(peerConnectionConfig);
+    myPeerConnection = newPeerConnection;
+    newPeerConnection.onicecandidate = (data) => {
+      stomp.send(`/chat/raw`, {}, JSON.stringify({type: "ice", from, iceCandidate: data.candidate}));
+    }
+    newPeerConnection.ontrack = handleTrack;
+    localStream.getTracks().forEach(track => {
+      newPeerConnection.addTrack(track, localStream);
+    });
+    return newPeerConnection;
+  }
+
+  const makeOffer = async () => {
+    const newPeerConnection = createPeerConnection();
+    if(localStream.getTracks().length === 0) {
+      const offer = await newPeerConnection.createOffer({offerToReceiveAudio: true, offerToReceiveVideo: true});
+      await newPeerConnection.setLocalDescription(offer);
+      stomp.send(`/chat/raw`, {}, JSON.stringify({type: "offer", from, sdp: newPeerConnection.localDescription}));
+    } else {
+      newPeerConnection.onnegotiationneeded = async () => {
+        const offer = await newPeerConnection.createOffer();
+        await newPeerConnection.setLocalDescription(offer);
+        stomp.send(`/chat/raw`, {}, JSON.stringify({type: "offer", from, sdp: newPeerConnection.localDescription}));
+      }
+    }
+  }
+
+  // const makeAnswer = async (receivedOffer) => {
+  //   const newPeerConnection = createPeerConnection();
+  //   if(!newPeerConnection) {
+  //     return;
+  //   }
+  //   await newPeerConnection.setRemoteDescription(receivedOffer);
+  //   const answer = await newPeerConnection.createAnswer();
+  //   await newPeerConnection.setLocalDescription(answer);
+  //   stomp.send(`/chat/raw`, {}, JSON.stringify({type: "answer", from, sdp: newPeerConnection.localDescription}));
+  // }
+
+  const videoConn = async () => {
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: {echoCancellation: true},
+      video: {
+        facingMode: "user"
+      },
+    });
+    myVideo.srcObject = localStream;
+    await makeOffer();
+  }
+
+  stomp.connect({}, () => {
+    stomp.subscribe("/subs/raw", (message) => {
+      const json = JSON.parse(message.body);
+      if(json.type === "answer") {
+        if(from === json.to) {
+          myPeerConnection.setRemoteDescription(json.sdp);
+        }
+      } else if(json.type === "ice") {
+        if(from === json.to) {
+          myPeerConnection.addIceCandidate(json.iceCandidate);
+        }
+      }
+    });
+    videoConn();
+  });
+
+
+</script>
+</html>
